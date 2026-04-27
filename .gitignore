@@ -1,3 +1,14 @@
+# Local dev notes
+dev note.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
 # Logs
 logs
 *.log
