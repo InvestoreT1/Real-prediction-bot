@@ -1,6 +1,7 @@
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
+    CallbackQueryHandler,
     MessageHandler,
     filters,
 )
@@ -19,6 +20,11 @@ from bot.handlers.admin import (
     listusers,
     broadcast,
 )
+from bot.handlers.predictions import (
+    pickgames,
+    previousresult,
+    handle_pick_callback,
+)
 
 
 def main():
@@ -36,6 +42,12 @@ def main():
     app.add_handler(CommandHandler("listgames", listgames))
     app.add_handler(CommandHandler("listusers", listusers))
     app.add_handler(CommandHandler("broadcast", broadcast))
+
+    app.add_handler(CommandHandler("pickgames", pickgames))
+    app.add_handler(CommandHandler("previousresult", previousresult))
+
+    app.add_handler(CallbackQueryHandler(handle_pick_callback, pattern="^pick_"))
+    app.add_handler(CallbackQueryHandler(handle_pick_callback, pattern="^result_page_"))
 
     app.add_handler(
         MessageHandler(
@@ -71,6 +83,23 @@ async def _route_text(update, context):
         from bot.handlers.admin import handle_broadcast_confirm
         await handle_broadcast_confirm(update, context)
         return
+
+    if user_data.get("pick_step") == "scoring":
+        from bot.handlers.predictions import handle_score_input
+        handled = await handle_score_input(update, context)
+        if handled:
+            return
+
+    if user_data.get("pick_step") == "confirming":
+        from bot.handlers.predictions import handle_prediction_confirm
+        await handle_prediction_confirm(update, context)
+        return
+
+    text = update.message.text.strip()
+    if text == "Pick Games":
+        await pickgames(update, context)
+    elif text == "Previous Result":
+        await previousresult(update, context)
 
 
 if __name__ == "__main__":
