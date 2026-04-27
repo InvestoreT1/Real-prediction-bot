@@ -7,23 +7,22 @@ from telegram.ext import (
 )
 from config.settings import settings
 from db.database import init_db
+from bot.constants import (
+    AWAITING_EXPORT_CONFIRM, AWAITING_IMPORT_KEY,
+    ADDGAME_STEP, AWAITING_BROADCAST_CONFIRM,
+    PICK_STEP, PICK_STATE_SCORING, PICK_STATE_CONFIRMING,
+)
 from bot.handlers.start import (
-    start,
-    export_wallet,
-    import_wallet,
+    start, export_wallet, import_wallet,
+    export_wallet_confirm, import_wallet_key,
 )
 from bot.handlers.admin import (
-    addgame,
-    closegame,
-    postresult,
-    listgames,
-    listusers,
-    broadcast,
+    addgame, closegame, postresult, listgames, listusers, broadcast,
+    handle_addgame_step, handle_broadcast_confirm,
 )
 from bot.handlers.predictions import (
-    pickgames,
-    previousresult,
-    handle_pick_callback,
+    pickgames, previousresult, handle_pick_callback,
+    handle_score_input, handle_prediction_confirm,
 )
 
 
@@ -49,12 +48,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_pick_callback, pattern="^pick_"))
     app.add_handler(CallbackQueryHandler(handle_pick_callback, pattern="^result_page_"))
 
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            _route_text,
-        )
-    )
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _route_text))
 
     print("Bot is running...")
     app.run_polling()
@@ -63,35 +57,27 @@ def main():
 async def _route_text(update, context):
     user_data = context.user_data
 
-    if user_data.get("awaiting_export_confirm"):
-        from bot.handlers.start import export_wallet_confirm
+    if user_data.get(AWAITING_EXPORT_CONFIRM):
         await export_wallet_confirm(update, context)
         return
 
-    if user_data.get("awaiting_import_key"):
-        from bot.handlers.start import import_wallet_key
+    if user_data.get(AWAITING_IMPORT_KEY):
         await import_wallet_key(update, context)
         return
 
-    if user_data.get("addgame_step"):
-        from bot.handlers.admin import handle_addgame_step
-        handled = await handle_addgame_step(update, context)
-        if handled:
+    if user_data.get(ADDGAME_STEP):
+        if await handle_addgame_step(update, context):
             return
 
-    if user_data.get("awaiting_broadcast_confirm"):
-        from bot.handlers.admin import handle_broadcast_confirm
+    if user_data.get(AWAITING_BROADCAST_CONFIRM):
         await handle_broadcast_confirm(update, context)
         return
 
-    if user_data.get("pick_step") == "scoring":
-        from bot.handlers.predictions import handle_score_input
-        handled = await handle_score_input(update, context)
-        if handled:
+    if user_data.get(PICK_STEP) == PICK_STATE_SCORING:
+        if await handle_score_input(update, context):
             return
 
-    if user_data.get("pick_step") == "confirming":
-        from bot.handlers.predictions import handle_prediction_confirm
+    if user_data.get(PICK_STEP) == PICK_STATE_CONFIRMING:
         await handle_prediction_confirm(update, context)
         return
 

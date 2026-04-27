@@ -2,6 +2,7 @@ from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import ContextTypes
 from bot.services.user import get_or_create_user
 from bot.services.wallet import get_private_key_for_user, import_wallet_for_user
+from bot.constants import AWAITING_EXPORT_CONFIRM, AWAITING_IMPORT_KEY
 
 MAIN_MENU = ReplyKeyboardMarkup(
     [
@@ -44,8 +45,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def export_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    context.user_data["awaiting_export_confirm"] = True
+    context.user_data[AWAITING_EXPORT_CONFIRM] = True
     await update.message.reply_text(
         "This will send your private key in this chat.\n\n"
         "Anyone with your private key has full access to your wallet and funds.\n\n"
@@ -54,10 +54,10 @@ async def export_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def export_wallet_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get("awaiting_export_confirm"):
+    if not context.user_data.get(AWAITING_EXPORT_CONFIRM):
         return
 
-    context.user_data.pop("awaiting_export_confirm")
+    context.user_data.pop(AWAITING_EXPORT_CONFIRM)
 
     if update.message.text.strip().upper() != "CONFIRM":
         await update.message.reply_text("Export cancelled.")
@@ -76,7 +76,7 @@ async def export_wallet_confirm(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def import_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["awaiting_import_key"] = True
+    context.user_data[AWAITING_IMPORT_KEY] = True
     await update.message.reply_text(
         "Send your Solana private key in base58 format.\n\n"
         "This will replace your current bot wallet.\n"
@@ -85,10 +85,10 @@ async def import_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def import_wallet_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get("awaiting_import_key"):
+    if not context.user_data.get(AWAITING_IMPORT_KEY):
         return
 
-    context.user_data.pop("awaiting_import_key")
+    context.user_data.pop(AWAITING_IMPORT_KEY)
     private_key_b58 = update.message.text.strip()
 
     wallet_address = import_wallet_for_user(update.effective_user.id, private_key_b58)

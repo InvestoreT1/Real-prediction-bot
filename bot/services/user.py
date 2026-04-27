@@ -4,8 +4,7 @@ from bot.services.wallet import generate_wallet
 
 
 def get_or_create_user(telegram_id: int, username: str, referral_code: str = None) -> tuple[User, bool]:
-    session = get_session()
-    try:
+    with get_session() as session:
         user = session.query(User).filter_by(telegram_id=telegram_id).first()
         if user:
             return user, False
@@ -29,8 +28,3 @@ def get_or_create_user(telegram_id: int, username: str, referral_code: str = Non
         session.commit()
         session.refresh(user)
         return user, True
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()

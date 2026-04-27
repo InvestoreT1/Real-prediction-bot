@@ -1,12 +1,22 @@
 from decimal import Decimal
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
+from bot.constants import (
+    PICK_STEP, PICK_GAMES, PICK_SELECTED, PICK_SCORES, PICK_SCORE_INDEX,
+    PICK_STATE_SELECTING, PICK_STATE_SCORING, PICK_STATE_CONFIRMING,
+)
+from bot.utils import parse_score, reply_or_edit
 from bot.services.game import get_active_games
 from bot.services.prediction import submit_prediction, get_user_submissions, get_user_balance
 
 ENTRY_FEE = Decimal("1.00")
 ENTRY_CURRENCY = "usdt"
 PICKS_REQUIRED = 3
+
+
+def _clear_pick_state(context: ContextTypes.DEFAULT_TYPE):
+    for key in (PICK_STEP, PICK_SELECTED, PICK_SCORES, PICK_GAMES, PICK_SCORE_INDEX):
+        context.user_data.pop(key, None)
 
 
 async def pickgames(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -16,26 +26,26 @@ async def pickgames(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No active games right now. Check back later.")
         return
 
-    context.user_data["pick_games"] = {}
-    context.user_data["pick_selected"] = []
-    context.user_data["pick_scores"] = []
-    context.user_data["pick_step"] = "selecting"
-
-    for game in games:
-        context.user_data["pick_games"][game.id] = {
+    context.user_data[PICK_GAMES] = {
+        game.id: {
             "id": game.id,
             "league": game.league,
             "home": game.home_team,
             "away": game.away_team,
             "kickoff": game.kickoff_time.strftime("%Y-%m-%d %H:%M"),
         }
+        for game in games
+    }
+    context.user_data[PICK_SELECTED] = []
+    context.user_data[PICK_SCORES] = []
+    context.user_data[PICK_STEP] = PICK_STATE_SELECTING
 
     await _send_game_list(update, context)
 
 
 async def _send_game_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    games = context.user_data.get("pick_games", {})
-    selected = context.user_data.get("pick_selected", [])
+    games = context.user_data.get(PICK_GAMES, {})
+    selected = context.user_data.get(PICK_SELECTED, [])
 
     current_league = None
     text_lines = [
@@ -55,7 +65,7 @@ async def _send_game_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text_lines.append(f"{marker}{game['home']} vs {game['away']} | {game['kickoff']} UTC")
         keyboard.append([
             InlineKeyboardButton(
-                f"{'✓ ' if is_selected else ''}{game['home']} vs {game['away']}",
+                f"{marker}{game['home']} vs {game['away']}",
                 callback_data=f"pick_{game['id']}",
             )
         ])
@@ -63,33 +73,27 @@ async def _send_game_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(selected) == PICKS_REQUIRED:
         keyboard.append([InlineKeyboardButton("Submit Picks", callback_data="pick_submit")])
 
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    if update.message:
-        await update.message.reply_text("\n".join(text_lines), reply_markup=reply_markup)
-    else:
-        await update.callback_query.edit_message_text("\n".join(text_lines), reply_markup=reply_markup)
+    await reply_or_edit(update, "\n".join(text_lines), InlineKeyboardMarkup(keyboard))
 
 
 async def handle_pick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     data = query.data
 
     if data == "pick_submit":
-        selected = context.user_data.get("pick_selected", [])
+        selected = context.user_data.get(PICK_SELECTED, [])
         if len(selected) != PICKS_REQUIRED:
             await query.answer(f"Select exactly {PICKS_REQUIRED} games.", show_alert=True)
             return
-        context.user_data["pick_step"] = "scoring"
-        context.user_data["pick_score_index"] = 0
+        context.user_data[PICK_STEP] = PICK_STATE_SCORING
+        context.user_data[PICK_SCORE_INDEX] = 0
         await _ask_for_score(update, context)
         return
 
     if data.startswith("pick_"):
         game_id = int(data.split("_")[1])
-        selected = context.user_data.get("pick_selected", [])
+        selected = context.user_data.get(PICK_SELECTED, [])
 
         if game_id in selected:
             selected.remove(game_id)
@@ -99,8 +103,9 @@ async def handle_pick_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                 return
             selected.append(game_id)
 
-        context.user_data["pick_selected"] = selected
+        context.user_data[PICK_SELECTED] = selected
         await _send_game_list(update, context)
+        return
 
     if data.startswith("result_page_"):
         page = int(data.split("_")[2])
@@ -108,12 +113,10 @@ async def handle_pick_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def _ask_for_score(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    selected = context.user_data.get("pick_selected", [])
-    index = context.user_data.get("pick_score_index", 0)
-    games = context.user_data.get("pick_games", {})
-
+    selected = context.user_data.get(PICK_SELECTED, [])
+    index = context.user_data.get(PICK_SCORE_INDEX, 0)
+    games = context.user_data.get(PICK_GAMES, {})
     game = games[selected[index]]
-    context.user_data["pick_step"] = "scoring"
 
     text = (
         f"Game {index + 1} of {PICKS_REQUIRED}\n\n"
@@ -123,57 +126,38 @@ async def _ask_for_score(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Enter your predicted score (format: home-away)\n"
         f"Example: 2-1"
     )
-
-    if update.callback_query:
-        await update.callback_query.edit_message_text(text)
-    else:
-        await update.message.reply_text(text)
+    await reply_or_edit(update, text)
 
 
 async def handle_score_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    if context.user_data.get("pick_step") != "scoring":
+    if context.user_data.get(PICK_STEP) != PICK_STATE_SCORING:
         return False
 
-    text = update.message.text.strip()
-
-    if "-" not in text:
-        await update.message.reply_text("Use format home-away. Example: 2-1")
-        return True
-
-    parts = text.split("-")
-    if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+    score = parse_score(update.message.text)
+    if score is None:
         await update.message.reply_text("Invalid score. Use format: 2-1")
         return True
 
-    home_score = int(parts[0])
-    away_score = int(parts[1])
+    selected = context.user_data.get(PICK_SELECTED, [])
+    index = context.user_data.get(PICK_SCORE_INDEX, 0)
+    games = context.user_data.get(PICK_GAMES, {})
+    scores = context.user_data.get(PICK_SCORES, [])
 
-    selected = context.user_data.get("pick_selected", [])
-    index = context.user_data.get("pick_score_index", 0)
-    games = context.user_data.get("pick_games", {})
-    scores = context.user_data.get("pick_scores", [])
-
-    scores.append({
-        "game_id": selected[index],
-        "home_score": home_score,
-        "away_score": away_score,
-    })
-    context.user_data["pick_scores"] = scores
-    context.user_data["pick_score_index"] = index + 1
+    scores.append({"game_id": selected[index], "home_score": score[0], "away_score": score[1]})
+    context.user_data[PICK_SCORES] = scores
+    context.user_data[PICK_SCORE_INDEX] = index + 1
 
     if index + 1 < PICKS_REQUIRED:
         await _ask_for_score(update, context)
         return True
 
-    context.user_data["pick_step"] = "confirming"
-    scores_list = context.user_data["pick_scores"]
-
+    context.user_data[PICK_STEP] = PICK_STATE_CONFIRMING
     lines = ["Your picks:\n"]
-    for i, score in enumerate(scores_list):
+    for i, s in enumerate(scores):
         game = games[selected[i]]
         lines.append(
             f"{i + 1}. {game['home']} vs {game['away']}\n"
-            f"   Your score: {score['home_score']}-{score['away_score']}\n"
+            f"   Your score: {s['home_score']}-{s['away_score']}\n"
         )
 
     balance = get_user_balance(update.effective_user.id, ENTRY_CURRENCY)
@@ -186,17 +170,13 @@ async def handle_score_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def handle_prediction_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    if context.user_data.get("pick_step") != "confirming":
+    if context.user_data.get(PICK_STEP) != PICK_STATE_CONFIRMING:
         return False
 
     text = update.message.text.strip().upper()
 
     if text == "CANCEL":
-        context.user_data.pop("pick_step", None)
-        context.user_data.pop("pick_selected", None)
-        context.user_data.pop("pick_scores", None)
-        context.user_data.pop("pick_games", None)
-        context.user_data.pop("pick_score_index", None)
+        _clear_pick_state(context)
         await update.message.reply_text("Picks discarded.")
         return True
 
@@ -205,12 +185,8 @@ async def handle_prediction_confirm(update: Update, context: ContextTypes.DEFAUL
         return True
 
     picks = [
-        {
-            "game_id": s["game_id"],
-            "home_score": s["home_score"],
-            "away_score": s["away_score"],
-        }
-        for s in context.user_data["pick_scores"]
+        {"game_id": s["game_id"], "home_score": s["home_score"], "away_score": s["away_score"]}
+        for s in context.user_data[PICK_SCORES]
     ]
 
     result = submit_prediction(
@@ -220,11 +196,7 @@ async def handle_prediction_confirm(update: Update, context: ContextTypes.DEFAUL
         currency=ENTRY_CURRENCY,
     )
 
-    context.user_data.pop("pick_step", None)
-    context.user_data.pop("pick_selected", None)
-    context.user_data.pop("pick_scores", None)
-    context.user_data.pop("pick_games", None)
-    context.user_data.pop("pick_score_index", None)
+    _clear_pick_state(context)
 
     if "error" in result:
         await update.message.reply_text(f"Submission failed.\n{result['error']}")
@@ -244,8 +216,7 @@ async def previousresult(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _send_results_page(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int):
-    telegram_id = update.effective_user.id
-    data = get_user_submissions(telegram_id, page=page)
+    data = get_user_submissions(update.effective_user.id, page=page)
 
     submissions = data["submissions"]
     total = data["total"]
@@ -253,22 +224,16 @@ async def _send_results_page(update: Update, context: ContextTypes.DEFAULT_TYPE,
     total_pages = max(1, (total + per_page - 1) // per_page)
 
     if not submissions:
-        text = "You have no prediction history yet."
-        if update.message:
-            await update.message.reply_text(text)
-        else:
-            await update.callback_query.edit_message_text(text)
+        await reply_or_edit(update, "You have no prediction history yet.")
         return
 
     lines = [f"Your Prediction History (Page {page}/{total_pages})\n"]
 
     for sub in submissions:
-        status_label = sub["status"].upper()
-        payout_line = f"Payout: {sub['payout']} {sub['currency'].upper()}" if sub["payout"] else ""
+        payout_line = f" | Payout: {sub['payout']} {sub['currency'].upper()}" if sub["payout"] else ""
         lines.append(
-            f"Submission {sub['id']} | {sub['date']} | {status_label}\n"
-            f"Entry: {sub['entry_fee']} {sub['currency'].upper()}"
-            + (f" | {payout_line}" if payout_line else "") + "\n"
+            f"Submission {sub['id']} | {sub['date']} | {sub['status'].upper()}\n"
+            f"Entry: {sub['entry_fee']} {sub['currency'].upper()}{payout_line}\n"
         )
         for pick in sub["picks"]:
             lines.append(
@@ -284,9 +249,4 @@ async def _send_results_page(update: Update, context: ContextTypes.DEFAULT_TYPE,
         nav_buttons.append(InlineKeyboardButton("Next", callback_data=f"result_page_{page + 1}"))
 
     reply_markup = InlineKeyboardMarkup([nav_buttons]) if nav_buttons else None
-    text = "\n".join(lines)
-
-    if update.message:
-        await update.message.reply_text(text, reply_markup=reply_markup)
-    else:
-        await update.callback_query.edit_message_text(text, reply_markup=reply_markup)
+    await reply_or_edit(update, "\n".join(lines), reply_markup)

@@ -1,20 +1,19 @@
 from decimal import Decimal
+from sqlalchemy.orm import joinedload
 from db.database import get_session
 from db.models import (
     Submission, Prediction, Transaction,
-    TransactionType, SubmissionStatus, Currency, User, Game, GameStatus
+    TransactionType, SubmissionStatus, Currency, User
 )
+from bot.utils import adjust_balance
 
 
 def get_user_balance(telegram_id: int, currency: str) -> Decimal:
-    session = get_session()
-    try:
+    with get_session() as session:
         user = session.query(User).filter_by(telegram_id=telegram_id).first()
         if not user:
             return Decimal("0")
         return user.balance_usdt if currency == "usdt" else user.balance_token
-    finally:
-        session.close()
 
 
 def submit_prediction(
@@ -23,8 +22,7 @@ def submit_prediction(
     entry_fee: Decimal,
     currency: str,
 ) -> dict:
-    session = get_session()
-    try:
+    with get_session() as session:
         user = session.query(User).filter_by(telegram_id=telegram_id).first()
         if not user:
             return {"error": "User not found."}
@@ -33,10 +31,7 @@ def submit_prediction(
         if balance < entry_fee:
             return {"error": f"Insufficient balance. You have {balance} {currency.upper()}."}
 
-        if currency == "usdt":
-            user.balance_usdt -= entry_fee
-        else:
-            user.balance_token -= entry_fee
+        adjust_balance(user, currency, entry_fee, deduct=True)
 
         submission = Submission(
             user_id=user.id,
@@ -48,34 +43,26 @@ def submit_prediction(
         session.flush()
 
         for pick in picks:
-            prediction = Prediction(
+            session.add(Prediction(
                 submission_id=submission.id,
                 game_id=pick["game_id"],
                 predicted_home_score=pick["home_score"],
                 predicted_away_score=pick["away_score"],
-            )
-            session.add(prediction)
+            ))
 
-        tx = Transaction(
+        session.add(Transaction(
             user_id=user.id,
             type=TransactionType.bet,
             amount=entry_fee,
             currency=Currency[currency],
-        )
-        session.add(tx)
+        ))
 
         session.commit()
         return {"success": True, "submission_id": submission.id}
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
 
 
 def get_user_submissions(telegram_id: int, page: int = 1, per_page: int = 5) -> dict:
-    session = get_session()
-    try:
+    with get_session() as session:
         user = session.query(User).filter_by(telegram_id=telegram_id).first()
         if not user:
             return {"submissions": [], "total": 0, "page": page}
@@ -84,6 +71,7 @@ def get_user_submissions(telegram_id: int, page: int = 1, per_page: int = 5) -> 
         submissions = (
             session.query(Submission)
             .filter_by(user_id=user.id)
+            .options(joinedload(Submission.predictions).joinedload(Prediction.game))
             .order_by(Submission.created_at.desc())
             .offset((page - 1) * per_page)
             .limit(per_page)
@@ -94,7 +82,7 @@ def get_user_submissions(telegram_id: int, page: int = 1, per_page: int = 5) -> 
         for sub in submissions:
             preds = []
             for pred in sub.predictions:
-                game = session.query(Game).filter_by(id=pred.game_id).first()
+                game = pred.game
                 preds.append({
                     "game": f"{game.home_team} vs {game.away_team}" if game else "Unknown",
                     "predicted": f"{pred.predicted_home_score}-{pred.predicted_away_score}",
@@ -115,5 +103,3 @@ def get_user_submissions(telegram_id: int, page: int = 1, per_page: int = 5) -> 
             })
 
         return {"submissions": result, "total": total, "page": page, "per_page": per_page}
-    finally:
-        session.close()

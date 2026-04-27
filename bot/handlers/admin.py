@@ -1,7 +1,10 @@
+import asyncio
 from datetime import datetime
 from telegram import Update
 from telegram.ext import ContextTypes
 from bot.handlers.admin_auth import admin_only
+from bot.constants import ADDGAME_STEP, ADDGAME_DATA, AWAITING_BROADCAST_CONFIRM, BROADCAST_MESSAGE
+from bot.utils import parse_score
 from bot.services.game import (
     create_game, close_game, post_result,
     get_all_games, get_all_users,
@@ -9,17 +12,16 @@ from bot.services.game import (
 
 LEAGUES = ["Premier League", "Serie A", "Bundesliga", "La Liga"]
 
-ADD_GAME_STEPS = ["league", "home_team", "away_team", "kickoff_time"]
+TELEGRAM_BROADCAST_BATCH = 25
+TELEGRAM_BROADCAST_DELAY = 1.0
 
 
 @admin_only
 async def addgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["addgame"] = {}
+    context.user_data[ADDGAME_DATA] = {}
     league_list = "\n".join(f"{i + 1}. {l}" for i, l in enumerate(LEAGUES))
-    await update.message.reply_text(
-        f"Add New Game\n\nSelect league by number:\n{league_list}"
-    )
-    context.user_data["addgame_step"] = "league"
+    await update.message.reply_text(f"Add New Game\n\nSelect league by number:\n{league_list}")
+    context.user_data[ADDGAME_STEP] = "league"
 
 
 @admin_only
@@ -46,22 +48,12 @@ async def postresult(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: /postresult <game_id> <home_score>-<away_score>\nExample: /postresult 3 2-1")
         return
 
-    game_id = int(args[0])
-    score_str = args[1]
-
-    if "-" not in score_str:
-        await update.message.reply_text("Score format must be home-away. Example: 2-1")
-        return
-
-    parts = score_str.split("-")
-    if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+    score = parse_score(args[1])
+    if score is None:
         await update.message.reply_text("Invalid score. Use format: 2-1")
         return
 
-    home_score = int(parts[0])
-    away_score = int(parts[1])
-
-    result = post_result(game_id, home_score, away_score)
+    result = post_result(int(args[0]), score[0], score[1])
 
     if "error" in result:
         await update.message.reply_text(result["error"])
@@ -81,9 +73,7 @@ async def listgames(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines = ["Recent Games\n"]
     for g in games:
-        score = ""
-        if g.actual_home_score is not None:
-            score = f" | Result: {g.actual_home_score}-{g.actual_away_score}"
+        score = f" | Result: {g.actual_home_score}-{g.actual_away_score}" if g.actual_home_score is not None else ""
         lines.append(
             f"ID {g.id} | {g.league}\n"
             f"{g.home_team} vs {g.away_team}\n"
@@ -123,19 +113,19 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: /broadcast <your message>")
         return
 
-    context.user_data["broadcast_message"] = " ".join(context.args)
-    context.user_data["awaiting_broadcast_confirm"] = True
+    context.user_data[BROADCAST_MESSAGE] = " ".join(context.args)
+    context.user_data[AWAITING_BROADCAST_CONFIRM] = True
     await update.message.reply_text(
-        f"Message preview:\n\n{context.user_data['broadcast_message']}\n\nType SEND to broadcast or anything else to cancel."
+        f"Message preview:\n\n{context.user_data[BROADCAST_MESSAGE]}\n\nType SEND to broadcast or anything else to cancel."
     )
 
 
-async def handle_addgame_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    step = context.user_data.get("addgame_step")
+async def handle_addgame_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    step = context.user_data.get(ADDGAME_STEP)
     if not step:
         return False
 
-    data = context.user_data.get("addgame", {})
+    data = context.user_data.get(ADDGAME_DATA, {})
     text = update.message.text.strip()
 
     if step == "league":
@@ -143,22 +133,19 @@ async def handle_addgame_step(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text("Please enter a number between 1 and 4.")
             return True
         data["league"] = LEAGUES[int(text) - 1]
-        context.user_data["addgame"] = data
-        context.user_data["addgame_step"] = "home_team"
+        context.user_data[ADDGAME_STEP] = "home_team"
         await update.message.reply_text("Enter the home team name:")
         return True
 
     if step == "home_team":
         data["home_team"] = text
-        context.user_data["addgame"] = data
-        context.user_data["addgame_step"] = "away_team"
+        context.user_data[ADDGAME_STEP] = "away_team"
         await update.message.reply_text("Enter the away team name:")
         return True
 
     if step == "away_team":
         data["away_team"] = text
-        context.user_data["addgame"] = data
-        context.user_data["addgame_step"] = "kickoff_time"
+        context.user_data[ADDGAME_STEP] = "kickoff_time"
         await update.message.reply_text("Enter kickoff time (format: YYYY-MM-DD HH:MM in UTC):")
         return True
 
@@ -170,8 +157,8 @@ async def handle_addgame_step(update: Update, context: ContextTypes.DEFAULT_TYPE
             return True
 
         data["kickoff_time"] = kickoff
-        context.user_data.pop("addgame_step")
-        context.user_data.pop("addgame")
+        context.user_data.pop(ADDGAME_STEP)
+        context.user_data.pop(ADDGAME_DATA)
 
         game = create_game(
             league=data["league"],
@@ -194,27 +181,33 @@ async def handle_addgame_step(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def handle_broadcast_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    if not context.user_data.get("awaiting_broadcast_confirm"):
+    if not context.user_data.get(AWAITING_BROADCAST_CONFIRM):
         return False
 
-    context.user_data.pop("awaiting_broadcast_confirm")
-    message = context.user_data.pop("broadcast_message", "")
+    context.user_data.pop(AWAITING_BROADCAST_CONFIRM)
+    message = context.user_data.pop(BROADCAST_MESSAGE, "")
 
     if update.message.text.strip().upper() != "SEND":
         await update.message.reply_text("Broadcast cancelled.")
         return True
 
-    from bot.services.game import get_all_users
     users = get_all_users()
     sent = 0
     failed = 0
 
-    for user in users:
-        try:
-            await context.bot.send_message(chat_id=user.telegram_id, text=message)
-            sent += 1
-        except Exception:
-            failed += 1
+    for i in range(0, len(users), TELEGRAM_BROADCAST_BATCH):
+        batch = users[i:i + TELEGRAM_BROADCAST_BATCH]
+        results = await asyncio.gather(
+            *[context.bot.send_message(chat_id=u.telegram_id, text=message) for u in batch],
+            return_exceptions=True,
+        )
+        for r in results:
+            if isinstance(r, Exception):
+                failed += 1
+            else:
+                sent += 1
+        if i + TELEGRAM_BROADCAST_BATCH < len(users):
+            await asyncio.sleep(TELEGRAM_BROADCAST_DELAY)
 
     await update.message.reply_text(f"Broadcast done.\nSent: {sent} | Failed: {failed}")
     return True
